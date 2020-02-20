@@ -45,6 +45,7 @@ import threading
 from threading import Thread
 import time
 import types
+from datetime import datetime
 
 import monotonic
 from past.builtins import basestring
@@ -86,14 +87,62 @@ class Attitude(object):
     :param roll: Roll in radians
     """
 
-    def __init__(self, pitch, yaw, roll):
+    def __init__(self, pitch, yaw, roll,pitchspeed,yawspeed,rollspeed,time = None):
         self.pitch = pitch
         self.yaw = yaw
         self.roll = roll
+        self.pitchspeed = pitchspeed
+        self.yawspeed = yawspeed
+        self.rollspeed = rollspeed
+        self.time = time
+	#print(self)
 
     def __str__(self):
-        fmt = '{}:pitch={pitch},yaw={yaw},roll={roll}'
+        fmt = '{}:pitch={pitch},yaw={yaw},roll={roll},pitchspped={pitchspeed},rollspeed={rollspeed},yawspeed={yawspeed},time={time}'
         return fmt.format(self.__class__.__name__, **vars(self))
+
+class WindEstimate(object):
+    """
+    Wind Estimate information.
+
+    An object of this type is returned by :py:attr:`Vehicle.wind_estimate`.
+
+    :param x: x velocity, NED, m/s
+    :param y: y velocity, NED, m/s
+    :param z: z velocity, NED, m/s
+    """
+
+    def __init__(self, direction, speed, speed_z):
+        self.dir = direction
+        self.speed = speed
+        self.speed_z = speed_z
+
+    def __str__(self):
+        fmt = '{}:direction={dir},speed={speed},speed_z={speed_z}'
+        return fmt.format(self.__class__.__name__, **vars(self))
+
+
+class Acceleration(object):
+    """
+    Acceleration Estimate information.
+
+    An object of this type is returned by :py:attr:`Vehicle.Acceleration`.
+
+    :param x: x acceleration, body (m/s^2)
+    :param y: y acceleration, body (m/s^2)
+    :param z: z acceleration, body (m/s^2)
+    """
+
+    def __init__(self, ax, ay, az):
+        self.x = ax
+        self.y = ay
+        self.z = az
+
+    def __str__(self):
+        fmt = '{}:x={x},y={y},z={z}'
+        return fmt.format(self.__class__.__name__, **vars(self))
+
+
 
 
 class LocationGlobal(object):
@@ -155,17 +204,18 @@ class LocationGlobalRelative(object):
     :param alt: Altitude in meters (relative to the home location).
     """
 
-    def __init__(self, lat, lon, alt=None):
+    def __init__(self, lat, lon, alt=None,time = None):
         self.lat = lat
         self.lon = lon
         self.alt = alt
+	self.time = time
 
         # This is for backward compatibility.
         self.local_frame = None
         self.global_frame = None
 
     def __str__(self):
-        return "LocationGlobalRelative:lat=%s,lon=%s,alt=%s" % (self.lat, self.lon, self.alt)
+        return "LocationGlobalRelative:lat=%s,lon=%s,alt=%s,time=%s" % (self.lat, self.lon, self.alt,self.time)
 
 
 class LocationLocal(object):
@@ -342,7 +392,7 @@ class Version(object):
         if self.release is None:
             return None
         types = [ "dev", "alpha", "beta", "rc" ]
-        return types[self.release/64]
+        return types[self.release >> 6]
 
     def __str__(self):
         prefix=""
@@ -751,7 +801,7 @@ class ChannelsOverride(dict):
     def _send(self):
         if self._active:
             overrides = [0] * 8
-            for k, v in self.iteritems():
+            for k, v in self.items():
                 overrides[int(k) - 1] = v
             self._vehicle._master.mav.rc_channels_override_send(0, 0, *overrides)
 
@@ -846,7 +896,7 @@ class Channels(dict):
     def overrides(self, newch):
         self._overrides._active = False
         self._overrides.clear()
-        for k, v in newch.iteritems():
+        for k, v in newch.items():
             if v:
                 self._overrides[str(k)] = v
             else:
@@ -881,6 +931,7 @@ class Locations(HasObservers):
         def listener(vehicle, name, m):
             (self._lat, self._lon) = (m.lat / 1.0e7, m.lon / 1.0e7)
             self._relative_alt = m.relative_alt / 1000.0
+            self._glob_position_time = datetime.now()
             self.notify_attribute_listeners('global_relative_frame', self.global_relative_frame)
             vehicle.notify_attribute_listeners('location.global_relative_frame',
                                                vehicle.location.global_relative_frame)
@@ -973,7 +1024,7 @@ class Locations(HasObservers):
             print "Global Location (relative altitude): %s" % vehicle.location.global_relative_frame
             print "Altitude relative to home_location: %s" % vehicle.location.global_relative_frame.alt
         """
-        return LocationGlobalRelative(self._lat, self._lon, self._relative_alt)
+        return LocationGlobalRelative(self._lat, self._lon, self._relative_alt,self._glob_position_time)
 
 
 class Vehicle(HasObservers):
@@ -1063,6 +1114,7 @@ class Vehicle(HasObservers):
             self._pitchspeed = m.pitchspeed
             self._yawspeed = m.yawspeed
             self._rollspeed = m.rollspeed
+            self._att_time = datetime.now()
             self.notify_attribute_listeners('attitude', self.attitude)
 
         self._heading = None
@@ -1077,6 +1129,29 @@ class Vehicle(HasObservers):
             self.notify_attribute_listeners('airspeed', self.airspeed)
             self._groundspeed = m.groundspeed
             self.notify_attribute_listeners('groundspeed', self.groundspeed)
+
+	self._wind_dir = None
+        self._wind_speed = None
+        self._wind_speed_z = None
+
+	@self.on_message('WIND')
+        def listener(self,name,m):
+            self._wind_dir = m.direction
+            self._wind_speed= m.speed
+            self._wind_speed_z = m.speed_z
+            self.notify_attribute_listeners('wind_estimate',self.wind_estimate)
+           # errprinter( "received wind msg")
+	self._ax = None
+	self._ay = None
+	self._az = None
+
+        @self.on_message('RAW_IMU')# @self.on_message('RAW_IMU')
+        def listener(self, name, m):
+            self._ax = m.xacc/100.0 
+            self._ay = m.yacc/100.0 
+            self._az = m.zacc/100.0 
+            self.notify_attribute_listeners('acceleration', self.acceleration)
+           # errprinter( "received IMU msg")
 
         self._rngfnd_distance = None
         self._rngfnd_voltage = None
@@ -1316,6 +1391,7 @@ class Vehicle(HasObservers):
                         self._params_last = monotonic.monotonic()
                         self._params_duration = start_duration
                     self._params_set[msg.param_index] = msg
+
                 self._params_map[msg.param_id] = msg.param_value
                 self._parameters.notify_attribute_listeners(msg.param_id, msg.param_value,
                                                             cache=True)
@@ -1713,7 +1789,7 @@ class Vehicle(HasObservers):
         """
         Current vehicle attitude - pitch, yaw, roll (:py:class:`Attitude`).
         """
-        return Attitude(self._pitch, self._yaw, self._roll)
+        return Attitude(self._pitch, self._yaw, self._roll,self._pitchspeed,self._yawspeed,self._rollspeed,self._att_time)
 
     @property
     def gps_0(self):
@@ -1850,6 +1926,25 @@ class Vehicle(HasObservers):
 
         # send command to vehicle
         self.send_mavlink(msg)
+
+    @property
+    def wind_estimate(self):
+        """
+        Current wind estimate in metres/second (``double``).
+        """
+        return WindEstimate(self._wind_dir,self._wind_speed,self._wind_speed_z)
+
+    @property
+    def acceleration(self):
+        """
+        Current raw acceleration in m/s2 (``double``).
+        """
+        return Acceleration(self._ax,self._ay,self._az)
+
+
+
+
+
 
     @property
     def gimbal(self):
@@ -2346,9 +2441,9 @@ class Vehicle(HasObservers):
             raise ValueError('wait_ready expects one or more string arguments.')
 
         # Wait for these attributes to have been set.
-        await = set(types)
+        await_attributes = set(types)
         start = monotonic.monotonic()
-        while not await.issubset(self._ready_attrs):
+        while not await_attributes.issubset(self._ready_attrs):
             time.sleep(0.1)
             if monotonic.monotonic() - start > timeout:
                 if raise_exception:
@@ -2358,6 +2453,21 @@ class Vehicle(HasObservers):
                     return False
 
         return True
+
+    def reboot(self):
+        """Requests an autopilot reboot by sending a ``MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`` command."""
+
+        reboot_msg = self.message_factory.command_long_encode(
+            0, 0,  # target_system, target_component
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,  # command
+            0,  # confirmation
+            1,  # param 1, autopilot (reboot)
+            0,  # param 2, onboard computer (do nothing)
+            0,  # param 3, camera (do nothing)
+            0,  # param 4, mount (do nothing)
+            0, 0, 0)  # param 5 ~ 7 not used
+
+        self.send_mavlink(reboot_msg)
 
 
 class Gimbal(object):
@@ -2996,7 +3106,7 @@ def connect(ip,
 
         @vehicle.on_message('STATUSTEXT')
         def listener(self, name, m):
-            status_printer(re.sub(r'(^|\n)', '>>> ', m.text.decode('utf-8').rstrip()))
+            status_printer(re.sub(r'(^|\n)', '>>> ', m.text.rstrip()))
 
     if _initialize:
         vehicle.initialize(rate=rate, heartbeat_timeout=heartbeat_timeout)
